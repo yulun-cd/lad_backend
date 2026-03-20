@@ -1,5 +1,6 @@
 from datetime import date
 
+from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.test import TestCase
 from django.urls import reverse
@@ -36,7 +37,22 @@ class DailyLogModelTests(TestCase):
 
 
 class DailyLogApiTests(APITestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="daily_user",
+            password="daily-pass-123",
+        )
+        self.other_user = get_user_model().objects.create_user(
+            username="other_daily_user",
+            password="daily-pass-123",
+        )
+
+    def test_requires_authentication(self):
+        response = self.client.get(reverse("daily-log-list"))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
     def test_create_and_list_daily_logs(self):
+        self.client.force_authenticate(user=self.user)
         list_url = reverse("daily-log-list")
         payload = {
             "date": "2026-03-18",
@@ -54,9 +70,15 @@ class DailyLogApiTests(APITestCase):
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(list_response.data), 1)
         self.assertEqual(list_response.data[0]["date"], payload["date"])
+        self.assertEqual(
+            DailyLog.objects.get(id=list_response.data[0]["id"]).user,
+            self.user,
+        )
 
     def test_full_crud_flow(self):
+        self.client.force_authenticate(user=self.user)
         log = DailyLog.objects.create(
+            user=self.user,
             date=date(2026, 3, 17),
             overall=3,
             energy=2,
@@ -85,7 +107,24 @@ class DailyLogApiTests(APITestCase):
         self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(DailyLog.objects.filter(id=log.id).exists())
 
+    def test_user_cannot_access_another_users_daily_log(self):
+        self.client.force_authenticate(user=self.user)
+        other_log = DailyLog.objects.create(
+            user=self.other_user,
+            date=date(2026, 3, 19),
+            overall=4,
+            energy=4,
+            emotion=4,
+            productivity=4,
+            description="Private",
+        )
+
+        detail_url = reverse("daily-log-detail", args=[other_log.id])
+        response = self.client.get(detail_url)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
     def test_validation_for_out_of_range_values(self):
+        self.client.force_authenticate(user=self.user)
         list_url = reverse("daily-log-list")
         payload = {
             "date": "2026-03-18",

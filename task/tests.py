@@ -1,4 +1,5 @@
 from django.core.exceptions import ValidationError
+from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.urls import reverse
 from rest_framework import status
@@ -48,7 +49,22 @@ class TaskModelTests(TestCase):
 
 
 class TaskApiTests(APITestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="task_user",
+            password="task-pass-123",
+        )
+        self.other_user = get_user_model().objects.create_user(
+            username="other_task_user",
+            password="task-pass-123",
+        )
+
+    def test_requires_authentication(self):
+        response = self.client.get(reverse("task-list"))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
     def test_create_and_list_tasks(self):
+        self.client.force_authenticate(user=self.user)
         create_url = reverse("task-list")
         payload = {
             "name": "Read 10 pages",
@@ -64,9 +80,14 @@ class TaskApiTests(APITestCase):
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(list_response.data), 1)
         self.assertEqual(list_response.data[0]["name"], payload["name"])
+        self.assertEqual(
+            Task.objects.get(id=list_response.data[0]["id"]).user, self.user
+        )
 
     def test_full_crud_flow(self):
+        self.client.force_authenticate(user=self.user)
         task = Task.objects.create(
+            user=self.user,
             name="Morning jog",
             done=False,
             description="20 minute run",
@@ -93,7 +114,22 @@ class TaskApiTests(APITestCase):
         self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(Task.objects.filter(id=task.id).exists())
 
+    def test_user_cannot_access_another_users_task(self):
+        self.client.force_authenticate(user=self.user)
+        other_task = Task.objects.create(
+            user=self.other_user,
+            name="Private task",
+            done=False,
+            description="Not visible",
+            energy_level=3,
+        )
+
+        detail_url = reverse("task-detail", args=[other_task.id])
+        response = self.client.get(detail_url)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
     def test_energy_level_validation(self):
+        self.client.force_authenticate(user=self.user)
         create_url = reverse("task-list")
         payload = {
             "name": "Too tired",

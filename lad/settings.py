@@ -39,8 +39,10 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "rest_framework",
     "drf_spectacular",
+    "rest_framework_simplejwt.token_blacklist",
     "task",
     "daily_log",
+    "user_profile",
 ]
 
 MIDDLEWARE = [
@@ -132,6 +134,10 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # https://drf-spectacular.readthedocs.io/en/latest/
 REST_FRAMEWORK = {
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+    "DEFAULT_AUTHENTICATION_CLASSES": (
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
+    ),
+    "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
 }
 
 SPECTACULAR_SETTINGS = {

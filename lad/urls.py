@@ -27,6 +27,7 @@ from lad.views import healthcheck
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("health/", healthcheck, name="healthcheck"),
+    path("api/auth/", include("user_profile.urls")),
     path("api/", include("task.urls")),
     path("api/", include("daily_log.urls")),
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
