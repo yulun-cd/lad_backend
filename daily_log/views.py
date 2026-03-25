@@ -8,6 +8,7 @@ from daily_log.serializers import DailyLogSerializer
 class DailyLogViewSet(viewsets.ModelViewSet):
     serializer_class = DailyLogSerializer
     permission_classes = [IsAuthenticated]
+    http_method_names = ["get", "post", "put", "delete", "head", "options"]
 
     def get_queryset(self):
         return DailyLog.objects.filter(user=self.request.user).order_by("-date", "-id")

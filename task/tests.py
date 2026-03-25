@@ -1,7 +1,10 @@
+from datetime import timedelta
+
 from django.core.exceptions import ValidationError
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -12,13 +15,15 @@ class TaskModelTests(TestCase):
     def test_task_defaults_and_created_at(self):
         task = Task.objects.create(
             name="Evening stretch",
-            description="10 minutes",
             energy_level=2,
         )
 
         self.assertEqual(task.name, "Evening stretch")
         self.assertFalse(task.done)
+        self.assertEqual(task.status, Task.Status.PENDING)
+        self.assertEqual(task.description, "")
         self.assertIsNotNone(task.created_at)
+        self.assertIsNone(task.updated_at)
 
     def test_task_str_returns_name(self):
         task = Task(
@@ -69,7 +74,7 @@ class TaskApiTests(APITestCase):
         payload = {
             "name": "Read 10 pages",
             "done": False,
-            "description": "Read after dinner",
+            "status": Task.Status.PENDING,
             "energy_level": 3,
         }
 
@@ -90,6 +95,7 @@ class TaskApiTests(APITestCase):
             user=self.user,
             name="Morning jog",
             done=False,
+            status=Task.Status.PENDING,
             description="20 minute run",
             energy_level=4,
         )
@@ -102,13 +108,22 @@ class TaskApiTests(APITestCase):
         update_payload = {
             "name": "Morning jog",
             "done": True,
+            "status": Task.Status.COMPLETED,
             "description": "25 minute run",
             "energy_level": 5,
         }
         update_response = self.client.put(detail_url, update_payload, format="json")
         self.assertEqual(update_response.status_code, status.HTTP_200_OK)
         self.assertTrue(update_response.data["done"])
+        self.assertEqual(update_response.data["status"], Task.Status.COMPLETED)
         self.assertEqual(update_response.data["energy_level"], 5)
+
+        task.refresh_from_db()
+        self.assertIsNotNone(task.updated_at)
+        self.assertEqual(
+            update_response.data["updated_at"],
+            task.updated_at.isoformat().replace("+00:00", "Z"),
+        )
 
         delete_response = self.client.delete(detail_url)
         self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
@@ -134,6 +149,7 @@ class TaskApiTests(APITestCase):
         payload = {
             "name": "Too tired",
             "done": False,
+            "status": Task.Status.PENDING,
             "description": "Invalid energy value",
             "energy_level": 8,
         }
@@ -141,3 +157,108 @@ class TaskApiTests(APITestCase):
         response = self.client.post(create_url, payload, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("energy_level", response.data)
+
+    def test_status_validation(self):
+        self.client.force_authenticate(user=self.user)
+        create_url = reverse("task-list")
+        payload = {
+            "name": "Bad status",
+            "done": False,
+            "status": "UNKNOWN",
+            "description": "",
+            "energy_level": 3,
+        }
+
+        response = self.client.post(create_url, payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("status", response.data)
+
+    def test_list_filters_by_status(self):
+        self.client.force_authenticate(user=self.user)
+        Task.objects.create(
+            user=self.user,
+            name="Task pending",
+            status=Task.Status.PENDING,
+            energy_level=3,
+        )
+        Task.objects.create(
+            user=self.user,
+            name="Task done",
+            status=Task.Status.COMPLETED,
+            energy_level=4,
+        )
+
+        response = self.client.get(
+            reverse("task-list"),
+            {"status": Task.Status.COMPLETED},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]["name"], "Task done")
+        self.assertEqual(response.data[0]["status"], Task.Status.COMPLETED)
+
+    def test_list_filter_rejects_invalid_status(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.get(reverse("task-list"), {"status": "INVALID"})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("status", response.data)
+
+    def test_list_orders_by_status_then_last_activity(self):
+        self.client.force_authenticate(user=self.user)
+        base_time = timezone.now() - timedelta(days=2)
+
+        completed = Task.objects.create(
+            user=self.user,
+            name="Completed newest",
+            status=Task.Status.COMPLETED,
+            energy_level=2,
+        )
+        pending_old = Task.objects.create(
+            user=self.user,
+            name="Pending old",
+            status=Task.Status.PENDING,
+            energy_level=3,
+        )
+        pending_updated = Task.objects.create(
+            user=self.user,
+            name="Pending updated",
+            status=Task.Status.PENDING,
+            energy_level=4,
+        )
+        in_progress = Task.objects.create(
+            user=self.user,
+            name="In progress oldest",
+            status=Task.Status.IN_PROGRESS,
+            energy_level=5,
+        )
+
+        Task.objects.filter(id=completed.id).update(
+            created_at=base_time + timedelta(hours=4)
+        )
+        Task.objects.filter(id=pending_old.id).update(
+            created_at=base_time + timedelta(hours=2)
+        )
+        Task.objects.filter(id=pending_updated.id).update(
+            created_at=base_time + timedelta(hours=1)
+        )
+        Task.objects.filter(id=in_progress.id).update(created_at=base_time)
+
+        pending_updated.description = "updated"
+        pending_updated.save()
+
+        response = self.client.get(reverse("task-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ordered_names = [item["name"] for item in response.data]
+        self.assertEqual(
+            ordered_names,
+            [
+                "In progress oldest",
+                "Pending updated",
+                "Pending old",
+                "Completed newest",
+            ],
+        )

@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
@@ -21,6 +21,7 @@ class DailyLogModelTests(TestCase):
         )
 
         self.assertEqual(log.description, "")
+        self.assertIsNone(log.updated_at)
 
     def test_rating_fields_must_be_between_1_and_5(self):
         log = DailyLog(
@@ -75,6 +76,44 @@ class DailyLogApiTests(APITestCase):
             self.user,
         )
 
+    def test_list_orders_by_date_descending(self):
+        self.client.force_authenticate(user=self.user)
+        DailyLog.objects.create(
+            user=self.user,
+            date=date(2026, 3, 18),
+            overall=3,
+            energy=3,
+            emotion=3,
+            productivity=3,
+            description="middle",
+        )
+        DailyLog.objects.create(
+            user=self.user,
+            date=date(2026, 3, 20),
+            overall=4,
+            energy=4,
+            emotion=4,
+            productivity=4,
+            description="newest",
+        )
+        DailyLog.objects.create(
+            user=self.user,
+            date=date(2026, 3, 15),
+            overall=2,
+            energy=2,
+            emotion=2,
+            productivity=2,
+            description="oldest",
+        )
+
+        response = self.client.get(reverse("daily-log-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [item["date"] for item in response.data],
+            ["2026-03-20", "2026-03-18", "2026-03-15"],
+        )
+
     def test_full_crud_flow(self):
         self.client.force_authenticate(user=self.user)
         log = DailyLog.objects.create(
@@ -102,6 +141,13 @@ class DailyLogApiTests(APITestCase):
         update_response = self.client.put(detail_url, update_payload, format="json")
         self.assertEqual(update_response.status_code, status.HTTP_200_OK)
         self.assertEqual(update_response.data["overall"], 5)
+
+        log.refresh_from_db()
+        self.assertIsNotNone(log.updated_at)
+        self.assertEqual(
+            update_response.data["updated_at"],
+            log.updated_at.isoformat().replace("+00:00", "Z"),
+        )
 
         delete_response = self.client.delete(detail_url)
         self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
@@ -138,3 +184,117 @@ class DailyLogApiTests(APITestCase):
         response = self.client.post(list_url, payload, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("overall", response.data)
+
+    def test_cannot_create_daily_log_with_future_date(self):
+        self.client.force_authenticate(user=self.user)
+        list_url = reverse("daily-log-list")
+        future_date = (date.today() + timedelta(days=1)).isoformat()
+        payload = {
+            "date": future_date,
+            "overall": 4,
+            "energy": 4,
+            "emotion": 3,
+            "productivity": 5,
+            "description": "future day",
+        }
+
+        response = self.client.post(list_url, payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("date", response.data)
+
+    def test_can_create_daily_log_with_today_date(self):
+        self.client.force_authenticate(user=self.user)
+        list_url = reverse("daily-log-list")
+        today = date.today().isoformat()
+        payload = {
+            "date": today,
+            "overall": 4,
+            "energy": 4,
+            "emotion": 3,
+            "productivity": 5,
+            "description": "today's log",
+        }
+
+        response = self.client.post(list_url, payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["date"], today)
+
+    def test_cannot_update_daily_log_with_future_date(self):
+        self.client.force_authenticate(user=self.user)
+        log = DailyLog.objects.create(
+            user=self.user,
+            date=date.today(),
+            overall=3,
+            energy=2,
+            emotion=4,
+            productivity=3,
+            description="Current log",
+        )
+        detail_url = reverse("daily-log-detail", args=[log.id])
+        future_date = (date.today() + timedelta(days=2)).isoformat()
+        update_payload = {
+            "date": future_date,
+            "overall": 5,
+            "energy": 5,
+            "emotion": 4,
+            "productivity": 5,
+            "description": "Updated to future",
+        }
+
+        response = self.client.put(detail_url, update_payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("date", response.data)
+
+    def test_cannot_create_duplicate_daily_log_for_same_date(self):
+        self.client.force_authenticate(user=self.user)
+        test_date = date(2026, 3, 15).isoformat()
+        list_url = reverse("daily-log-list")
+        payload = {
+            "date": test_date,
+            "overall": 4,
+            "energy": 4,
+            "emotion": 3,
+            "productivity": 5,
+            "description": "first log",
+        }
+
+        create_response = self.client.post(list_url, payload, format="json")
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+
+        duplicate_payload = {
+            "date": test_date,
+            "overall": 3,
+            "energy": 3,
+            "emotion": 2,
+            "productivity": 3,
+            "description": "duplicate log",
+        }
+        duplicate_response = self.client.post(
+            list_url, duplicate_payload, format="json"
+        )
+        self.assertEqual(duplicate_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn(
+            "daily log for this date already exists",
+            str(duplicate_response.data).lower(),
+        )
+
+    def test_different_users_can_have_daily_log_same_date(self):
+        list_url = reverse("daily-log-list")
+        test_date = date(2026, 3, 15).isoformat()
+
+        self.client.force_authenticate(user=self.user)
+        payload = {
+            "date": test_date,
+            "overall": 4,
+            "energy": 4,
+            "emotion": 3,
+            "productivity": 5,
+            "description": "user 1 log",
+        }
+        response1 = self.client.post(list_url, payload, format="json")
+        self.assertEqual(response1.status_code, status.HTTP_201_CREATED)
+
+        self.client.force_authenticate(user=self.other_user)
+        payload["description"] = "user 2 log"
+        response2 = self.client.post(list_url, payload, format="json")
+        self.assertEqual(response2.status_code, status.HTTP_201_CREATED)
