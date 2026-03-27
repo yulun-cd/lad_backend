@@ -4,10 +4,12 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.test import TestCase
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from daily_log.models import DailyLog
+from task.models import Task
 
 
 class DailyLogModelTests(TestCase):
@@ -298,3 +300,140 @@ class DailyLogApiTests(APITestCase):
         payload["description"] = "user 2 log"
         response2 = self.client.post(list_url, payload, format="json")
         self.assertEqual(response2.status_code, status.HTTP_201_CREATED)
+
+    def test_daily_summary_requires_authentication(self):
+        response = self.client.get(reverse("daily-summary"))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_daily_summary_returns_completed_count_and_logs(self):
+        self.client.force_authenticate(user=self.user)
+        today = date.today()
+        yesterday = today - timedelta(days=1)
+
+        completed_today = Task.objects.create(
+            user=self.user,
+            name="Done today",
+            status=Task.Status.COMPLETED,
+            energy_level=3,
+        )
+        Task.objects.filter(id=completed_today.id).update(completed_at=timezone.now())
+
+        completed_other_day = Task.objects.create(
+            user=self.user,
+            name="Done old",
+            status=Task.Status.COMPLETED,
+            energy_level=3,
+        )
+        Task.objects.filter(id=completed_other_day.id).update(
+            completed_at=timezone.now() - timedelta(days=2)
+        )
+
+        Task.objects.create(
+            user=self.user,
+            name="Not done",
+            status=Task.Status.PENDING,
+            energy_level=2,
+        )
+
+        DailyLog.objects.create(
+            user=self.user,
+            date=yesterday,
+            overall=4,
+            energy=3,
+            emotion=4,
+            productivity=4,
+            description="Yesterday log",
+        )
+
+        response = self.client.get(reverse("daily-summary"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["tasks_completed_today"], 1)
+        self.assertIsNotNone(response.data["yesterday_daily_log"])
+        self.assertEqual(
+            response.data["yesterday_daily_log"]["date"],
+            yesterday.isoformat(),
+        )
+        self.assertIsNone(response.data["today_daily_log"])
+
+    def test_daily_summary_includes_todays_log_when_present(self):
+        self.client.force_authenticate(user=self.user)
+        today = date.today()
+
+        DailyLog.objects.create(
+            user=self.user,
+            date=today,
+            overall=5,
+            energy=5,
+            emotion=4,
+            productivity=5,
+            description="Today log",
+        )
+
+        response = self.client.get(reverse("daily-summary"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNotNone(response.data["today_daily_log"])
+        self.assertEqual(response.data["today_daily_log"]["date"], today.isoformat())
+
+    def test_streak_requires_authentication(self):
+        response = self.client.get(reverse("streak"))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_streak_counts_consecutive_completion_days_ending_today(self):
+        self.client.force_authenticate(user=self.user)
+        now = timezone.now()
+
+        for offset in range(3):
+            task = Task.objects.create(
+                user=self.user,
+                name=f"Done day {offset}",
+                status=Task.Status.COMPLETED,
+                energy_level=3,
+            )
+            Task.objects.filter(id=task.id).update(
+                completed_at=now - timedelta(days=offset)
+            )
+
+        old_task = Task.objects.create(
+            user=self.user,
+            name="Done old",
+            status=Task.Status.COMPLETED,
+            energy_level=2,
+        )
+        Task.objects.filter(id=old_task.id).update(completed_at=now - timedelta(days=5))
+
+        other_user_task = Task.objects.create(
+            user=self.other_user,
+            name="Other user done",
+            status=Task.Status.COMPLETED,
+            energy_level=2,
+        )
+        Task.objects.filter(id=other_user_task.id).update(
+            completed_at=now - timedelta(days=3)
+        )
+
+        response = self.client.get(reverse("streak"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["streak"], 3)
+
+    def test_streak_resets_to_zero_when_no_task_completed_today(self):
+        self.client.force_authenticate(user=self.user)
+        now = timezone.now()
+
+        for offset in (1, 2):
+            task = Task.objects.create(
+                user=self.user,
+                name=f"Done {offset}",
+                status=Task.Status.COMPLETED,
+                energy_level=3,
+            )
+            Task.objects.filter(id=task.id).update(
+                completed_at=now - timedelta(days=offset)
+            )
+
+        response = self.client.get(reverse("streak"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["streak"], 0)

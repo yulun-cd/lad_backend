@@ -24,6 +24,31 @@ class TaskModelTests(TestCase):
         self.assertEqual(task.description, "")
         self.assertIsNotNone(task.created_at)
         self.assertIsNone(task.updated_at)
+        self.assertIsNone(task.completed_at)
+
+    def test_completed_at_is_set_and_cleared_by_status_transition(self):
+        task = Task.objects.create(
+            name="Finish writeup",
+            status=Task.Status.PENDING,
+            energy_level=3,
+        )
+        self.assertIsNone(task.completed_at)
+
+        task.status = Task.Status.COMPLETED
+        task.save()
+        task.refresh_from_db()
+        self.assertIsNotNone(task.completed_at)
+        completed_at = task.completed_at
+
+        task.status = Task.Status.COMPLETED
+        task.save()
+        task.refresh_from_db()
+        self.assertEqual(task.completed_at, completed_at)
+
+        task.status = Task.Status.IN_PROGRESS
+        task.save()
+        task.refresh_from_db()
+        self.assertIsNone(task.completed_at)
 
     def test_task_str_returns_name(self):
         task = Task(
@@ -117,12 +142,17 @@ class TaskApiTests(APITestCase):
         self.assertTrue(update_response.data["done"])
         self.assertEqual(update_response.data["status"], Task.Status.COMPLETED)
         self.assertEqual(update_response.data["energy_level"], 5)
+        self.assertIsNotNone(update_response.data["completed_at"])
 
         task.refresh_from_db()
         self.assertIsNotNone(task.updated_at)
         self.assertEqual(
             update_response.data["updated_at"],
             task.updated_at.isoformat().replace("+00:00", "Z"),
+        )
+        self.assertEqual(
+            update_response.data["completed_at"],
+            task.completed_at.isoformat().replace("+00:00", "Z"),
         )
 
         delete_response = self.client.delete(detail_url)

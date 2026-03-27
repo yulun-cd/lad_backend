@@ -26,14 +26,29 @@ class Task(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(null=True, blank=True, default=None)
+    completed_at = models.DateTimeField(null=True, blank=True, default=None)
     description = models.TextField(blank=True)
     energy_level = models.IntegerField(
         validators=[MinValueValidator(1), MaxValueValidator(5)]
     )
 
     def save(self, *args, **kwargs):
+        previous = None
         if self.pk is not None:
+            previous = (
+                Task.objects.filter(pk=self.pk).values("status", "completed_at").first()
+            )
             self.updated_at = timezone.now()
+
+        if self.status == Task.Status.COMPLETED:
+            was_completed = previous and previous["status"] == Task.Status.COMPLETED
+            if not was_completed:
+                self.completed_at = timezone.now()
+            elif self.completed_at is None and previous["completed_at"] is not None:
+                self.completed_at = previous["completed_at"]
+        else:
+            self.completed_at = None
+
         super().save(*args, **kwargs)
 
     def __str__(self) -> str:
