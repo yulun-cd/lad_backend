@@ -58,6 +58,77 @@ class DailySummaryView(APIView):
         )
 
 
+class EnergyOverTimeView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        today = timezone.localdate()
+
+        start_date_str = request.query_params.get("start_date")
+        end_date_str = request.query_params.get("end_date")
+
+        if not start_date_str or not end_date_str:
+            return Response(
+                {"detail": "start_date and end_date are required."},
+                status=400,
+            )
+
+        try:
+            from datetime import date as date_type
+
+            start_date = date_type.fromisoformat(start_date_str)
+            end_date = date_type.fromisoformat(end_date_str)
+        except ValueError:
+            return Response(
+                {"detail": "Dates must be in YYYY-MM-DD format."},
+                status=400,
+            )
+
+        if start_date > today or end_date > today:
+            return Response(
+                {"detail": "start_date and end_date must not be in the future."},
+                status=400,
+            )
+
+        if start_date > end_date:
+            return Response(
+                {"detail": "start_date must not be after end_date."},
+                status=400,
+            )
+
+        if (end_date - start_date).days >= 30:
+            return Response(
+                {"detail": "The date range must be 30 days or fewer."},
+                status=400,
+            )
+
+        logs_by_date = {
+            log.date: log
+            for log in DailyLog.objects.filter(
+                user=request.user,
+                date__gte=start_date,
+                date__lte=end_date,
+            )
+        }
+
+        result = []
+        current = start_date
+        while current <= end_date:
+            log = logs_by_date.get(current)
+            result.append(
+                {
+                    "date": current.isoformat(),
+                    "overall": log.overall if log else None,
+                    "energy": log.energy if log else None,
+                    "emotion": log.emotion if log else None,
+                    "productivity": log.productivity if log else None,
+                }
+            )
+            current += timedelta(days=1)
+
+        return Response(result)
+
+
 class StreakView(APIView):
     permission_classes = [IsAuthenticated]
 

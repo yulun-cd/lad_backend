@@ -437,3 +437,134 @@ class DailyLogApiTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["streak"], 0)
+
+
+class EnergyOverTimeApiTests(APITestCase):
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(username="energy_user", password="pass")
+        self.other_user = User.objects.create_user(
+            username="energy_other", password="pass"
+        )
+        self.url = reverse("energy-over-time")
+
+    def _make_log(self, user, date, overall=3, energy=3, emotion=3, productivity=3):
+        return DailyLog.objects.create(
+            user=user,
+            date=date,
+            overall=overall,
+            energy=energy,
+            emotion=emotion,
+            productivity=productivity,
+        )
+
+    def test_requires_authentication(self):
+        response = self.client.get(
+            self.url, {"start_date": "2026-03-01", "end_date": "2026-03-07"}
+        )
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_missing_params_returns_400(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url, {"start_date": "2026-03-01"})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_invalid_date_format_returns_400(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(
+            self.url, {"start_date": "01-03-2026", "end_date": "2026-03-07"}
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_future_date_returns_400(self):
+        self.client.force_authenticate(user=self.user)
+        today = date.today()
+        future = (today + timedelta(days=1)).isoformat()
+        response = self.client.get(
+            self.url, {"start_date": today.isoformat(), "end_date": future}
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_start_after_end_returns_400(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(
+            self.url, {"start_date": "2026-03-10", "end_date": "2026-03-01"}
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_range_exceeding_30_days_returns_400(self):
+        self.client.force_authenticate(user=self.user)
+        today = date.today()
+        start = (today - timedelta(days=30)).isoformat()
+        response = self.client.get(
+            self.url, {"start_date": start, "end_date": today.isoformat()}
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_returns_one_entry_per_day_with_none_for_missing_logs(self):
+        self.client.force_authenticate(user=self.user)
+        today = date.today()
+        start = today - timedelta(days=2)
+
+        self._make_log(self.user, start, overall=4, energy=5, emotion=3, productivity=2)
+        # middle day has no log
+        self._make_log(self.user, today, overall=2, energy=1, emotion=4, productivity=5)
+
+        response = self.client.get(
+            self.url,
+            {
+                "start_date": start.isoformat(),
+                "end_date": today.isoformat(),
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        data = response.data
+        self.assertEqual(len(data), 3)
+
+        self.assertEqual(data[0]["date"], start.isoformat())
+        self.assertEqual(data[0]["overall"], 4)
+        self.assertEqual(data[0]["energy"], 5)
+        self.assertEqual(data[0]["emotion"], 3)
+        self.assertEqual(data[0]["productivity"], 2)
+
+        self.assertEqual(data[1]["date"], (start + timedelta(days=1)).isoformat())
+        self.assertIsNone(data[1]["overall"])
+        self.assertIsNone(data[1]["energy"])
+        self.assertIsNone(data[1]["emotion"])
+        self.assertIsNone(data[1]["productivity"])
+
+        self.assertEqual(data[2]["date"], today.isoformat())
+        self.assertEqual(data[2]["energy"], 1)
+
+    def test_does_not_include_other_users_logs(self):
+        self.client.force_authenticate(user=self.user)
+        today = date.today()
+        self._make_log(
+            self.other_user, today, energy=5, overall=5, emotion=5, productivity=5
+        )
+
+        response = self.client.get(
+            self.url,
+            {
+                "start_date": today.isoformat(),
+                "end_date": today.isoformat(),
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data[0]["energy"])
+
+    def test_30_day_range_is_allowed(self):
+        self.client.force_authenticate(user=self.user)
+        today = date.today()
+        start = today - timedelta(days=29)
+        response = self.client.get(
+            self.url,
+            {
+                "start_date": start.isoformat(),
+                "end_date": today.isoformat(),
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 30)
