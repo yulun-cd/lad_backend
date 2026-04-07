@@ -4,8 +4,22 @@ from rest_framework import viewsets
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
 
-from task.models import Task
-from task.serializers import TaskSerializer
+from task.models import Task, TaskTag
+from task.serializers import TaskSerializer, TaskTagSerializer
+
+
+class TaskTagViewSet(viewsets.ModelViewSet):
+    serializer_class = TaskTagSerializer
+    permission_classes = [IsAuthenticated]
+    http_method_names = ["get", "post", "put", "delete", "head", "options"]
+
+    def get_queryset(self):
+        return TaskTag.objects.filter(created_by=self.request.user).order_by(
+            "-created_at", "-id"
+        )
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
 
 
 class TaskViewSet(viewsets.ModelViewSet):
@@ -29,6 +43,12 @@ class TaskViewSet(viewsets.ModelViewSet):
                     }
                 )
             queryset = queryset.filter(status=status)
+
+        tag_ids = self.request.query_params.getlist("tag")
+        if tag_ids:
+            if not all(tid.isdigit() for tid in tag_ids):
+                raise ValidationError({"tag": ["Tag IDs must be positive integers."]})
+            queryset = queryset.filter(tag_id__in=tag_ids)
 
         return queryset.annotate(
             status_priority=Case(

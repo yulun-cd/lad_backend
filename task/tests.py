@@ -292,3 +292,215 @@ class TaskApiTests(APITestCase):
                 "Completed newest",
             ],
         )
+
+
+class TaskTagApiTests(APITestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="tag_user", password="pass"
+        )
+        self.other_user = get_user_model().objects.create_user(
+            username="other_tag_user", password="pass"
+        )
+
+    def _make_tag(self, user=None, name="Work", color="#FF0000"):
+        user = user or self.user
+        from task.models import TaskTag
+
+        return TaskTag.objects.create(name=name, color=color, created_by=user)
+
+    def test_requires_authentication(self):
+        response = self.client.get(reverse("task-tag-list"))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_create_tag(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            reverse("task-tag-list"),
+            {"name": "Work", "color": "#FF0000"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["name"], "Work")
+        self.assertEqual(response.data["color"], "#FF0000")
+        self.assertIn("id", response.data)
+        self.assertIn("created_at", response.data)
+
+    def test_create_tag_invalid_color(self):
+        self.client.force_authenticate(user=self.user)
+        for bad_color in ("red", "FF0000", "#GGG", "#1234567"):
+            response = self.client.post(
+                reverse("task-tag-list"),
+                {"name": "Bad", "color": bad_color},
+                format="json",
+            )
+            self.assertEqual(
+                response.status_code, status.HTTP_400_BAD_REQUEST, msg=bad_color
+            )
+            self.assertIn("color", response.data)
+
+    def test_list_only_own_tags(self):
+        self.client.force_authenticate(user=self.user)
+        self._make_tag(self.user, "Mine", "#AABBCC")
+        self._make_tag(self.other_user, "Theirs", "#112233")
+
+        response = self.client.get(reverse("task-tag-list"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]["name"], "Mine")
+
+    def test_retrieve_own_tag(self):
+        self.client.force_authenticate(user=self.user)
+        tag = self._make_tag()
+        response = self.client.get(reverse("task-tag-detail", args=[tag.id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_cannot_access_other_users_tag(self):
+        self.client.force_authenticate(user=self.user)
+        other_tag = self._make_tag(self.other_user, "Theirs", "#123456")
+        response = self.client.get(reverse("task-tag-detail", args=[other_tag.id]))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_update_tag(self):
+        self.client.force_authenticate(user=self.user)
+        tag = self._make_tag()
+        response = self.client.put(
+            reverse("task-tag-detail", args=[tag.id]),
+            {"name": "Personal", "color": "#00FF00"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["name"], "Personal")
+        self.assertEqual(response.data["color"], "#00FF00")
+
+    def test_delete_tag(self):
+        self.client.force_authenticate(user=self.user)
+        tag = self._make_tag()
+        response = self.client.delete(reverse("task-tag-detail", args=[tag.id]))
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        from task.models import TaskTag
+
+        self.assertFalse(TaskTag.objects.filter(id=tag.id).exists())
+
+    def test_cannot_delete_other_users_tag(self):
+        self.client.force_authenticate(user=self.user)
+        other_tag = self._make_tag(self.other_user, "Theirs", "#123456")
+        response = self.client.delete(reverse("task-tag-detail", args=[other_tag.id]))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class TaskTagRelationTests(APITestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="taskrel_user", password="pass"
+        )
+        self.other_user = get_user_model().objects.create_user(
+            username="taskrel_other", password="pass"
+        )
+        from task.models import TaskTag
+
+        self.tag = TaskTag.objects.create(
+            name="Work", color="#FF0000", created_by=self.user
+        )
+        self.other_tag = TaskTag.objects.create(
+            name="Other", color="#0000FF", created_by=self.other_user
+        )
+
+    def test_create_task_with_tag(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            reverse("task-list"),
+            {
+                "name": "Tagged task",
+                "energy_level": 3,
+                "status": "PENDING",
+                "tag": self.tag.id,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["tag"], self.tag.id)
+
+    def test_create_task_without_tag(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            reverse("task-list"),
+            {"name": "Untagged", "energy_level": 2, "status": "PENDING"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertIsNone(response.data["tag"])
+
+    def test_cannot_assign_other_users_tag_to_task(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            reverse("task-list"),
+            {
+                "name": "Bad tag",
+                "energy_level": 2,
+                "status": "PENDING",
+                "tag": self.other_tag.id,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("tag", response.data)
+
+    def test_update_task_tag_to_null(self):
+        self.client.force_authenticate(user=self.user)
+        task = Task.objects.create(
+            user=self.user, name="Task", energy_level=2, tag=self.tag
+        )
+        response = self.client.put(
+            reverse("task-detail", args=[task.id]),
+            {"name": "Task", "energy_level": 2, "status": "PENDING", "tag": None},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data["tag"])
+
+    def test_tag_nulled_when_tag_deleted(self):
+        self.client.force_authenticate(user=self.user)
+        task = Task.objects.create(
+            user=self.user, name="Task", energy_level=2, tag=self.tag
+        )
+        self.tag.delete()
+        task.refresh_from_db()
+        self.assertIsNone(task.tag)
+
+    def test_filter_tasks_by_tag_id(self):
+        self.client.force_authenticate(user=self.user)
+        Task.objects.create(user=self.user, name="Tagged", energy_level=2, tag=self.tag)
+        Task.objects.create(user=self.user, name="Untagged", energy_level=2)
+        response = self.client.get(reverse("task-list") + f"?tag={self.tag.id}")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        names = [t["name"] for t in response.data]
+        self.assertIn("Tagged", names)
+        self.assertNotIn("Untagged", names)
+
+    def test_filter_tasks_by_multiple_tag_ids(self):
+        self.client.force_authenticate(user=self.user)
+        from task.models import TaskTag
+        tag2 = TaskTag.objects.create(name="Home", color="#00FF00", created_by=self.user)
+        Task.objects.create(user=self.user, name="Work task", energy_level=2, tag=self.tag)
+        Task.objects.create(user=self.user, name="Home task", energy_level=2, tag=tag2)
+        Task.objects.create(user=self.user, name="Untagged", energy_level=2)
+        response = self.client.get(reverse("task-list") + f"?tag={self.tag.id}&tag={tag2.id}")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        names = [t["name"] for t in response.data]
+        self.assertIn("Work task", names)
+        self.assertIn("Home task", names)
+        self.assertNotIn("Untagged", names)
+
+    def test_filter_by_invalid_tag_id_returns_400(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(reverse("task-list") + "?tag=notanid")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("tag", response.data)
+
+    def test_filter_by_nonexistent_tag_returns_empty(self):
+        self.client.force_authenticate(user=self.user)
+        Task.objects.create(user=self.user, name="Tagged", energy_level=2, tag=self.tag)
+        response = self.client.get(reverse("task-list") + "?tag=99999")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 0)
