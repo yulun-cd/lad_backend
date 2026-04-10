@@ -1,9 +1,12 @@
+from django.urls import path
 from rest_framework.routers import DefaultRouter
 
-from task.views import TaskTagViewSet, TaskViewSet
+from task.views import TaskCompletionTimeView, TaskTagViewSet, TaskViewSet
 
 router = DefaultRouter()
 router.register("tasks", TaskViewSet, basename="task")
 router.register("task-tags", TaskTagViewSet, basename="task-tag")
 
-urlpatterns = router.urls
+urlpatterns = [
+    path("tasks/completion-time/", TaskCompletionTimeView.as_view(), name="task-completion-time"),
+] + router.urls

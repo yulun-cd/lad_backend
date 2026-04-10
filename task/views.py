@@ -1,8 +1,10 @@
-from django.db.models import Case, F, IntegerField, Value, When
-from django.db.models.functions import Coalesce, Greatest
+from django.db.models import Case, Count, F, IntegerField, Value, When
+from django.db.models.functions import Coalesce, ExtractHour, Greatest
 from rest_framework import viewsets
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from task.models import Task, TaskTag
 from task.serializers import TaskSerializer, TaskTagSerializer
@@ -66,3 +68,19 @@ class TaskViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
+
+
+class TaskCompletionTimeView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        counts_by_hour = (
+            Task.objects.filter(user=request.user, completed_at__isnull=False)
+            .annotate(hour=ExtractHour("completed_at"))
+            .values("hour")
+            .annotate(count=Count("id"))
+        )
+
+        hour_map = {row["hour"]: row["count"] for row in counts_by_hour}
+        data = [{"hour": h, "count": hour_map.get(h, 0)} for h in range(24)]
+        return Response(data)

@@ -504,3 +504,63 @@ class TaskTagRelationTests(APITestCase):
         response = self.client.get(reverse("task-list") + "?tag=99999")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data), 0)
+
+
+class TaskCompletionTimeTests(APITestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="comptime_user", password="pass"
+        )
+        self.other_user = get_user_model().objects.create_user(
+            username="comptime_other", password="pass"
+        )
+        self.url = reverse("task-completion-time")
+
+    def _make_completed_task(self, user, hour):
+        task = Task.objects.create(
+            user=user,
+            name=f"Task at {hour}h",
+            energy_level=2,
+            status=Task.Status.COMPLETED,
+        )
+        completed = timezone.now().replace(hour=hour, minute=0, second=0, microsecond=0)
+        Task.objects.filter(pk=task.pk).update(completed_at=completed)
+        return task
+
+    def test_requires_authentication(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_returns_all_24_hours(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 24)
+        hours = [entry["hour"] for entry in response.data]
+        self.assertEqual(hours, list(range(24)))
+
+    def test_counts_completed_tasks_by_hour(self):
+        self.client.force_authenticate(user=self.user)
+        self._make_completed_task(self.user, hour=9)
+        self._make_completed_task(self.user, hour=9)
+        self._make_completed_task(self.user, hour=14)
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        by_hour = {entry["hour"]: entry["count"] for entry in response.data}
+        self.assertEqual(by_hour[9], 2)
+        self.assertEqual(by_hour[14], 1)
+        self.assertEqual(by_hour[0], 0)
+
+    def test_excludes_other_users_tasks(self):
+        self.client.force_authenticate(user=self.user)
+        self._make_completed_task(self.other_user, hour=10)
+        response = self.client.get(self.url)
+        by_hour = {entry["hour"]: entry["count"] for entry in response.data}
+        self.assertEqual(by_hour[10], 0)
+
+    def test_excludes_incomplete_tasks(self):
+        self.client.force_authenticate(user=self.user)
+        Task.objects.create(user=self.user, name="Pending", energy_level=2)
+        response = self.client.get(self.url)
+        total = sum(entry["count"] for entry in response.data)
+        self.assertEqual(total, 0)
