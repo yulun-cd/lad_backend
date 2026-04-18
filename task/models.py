@@ -60,6 +60,18 @@ class Task(models.Model):
         blank=True,
         related_name="tasks",
     )
+    date = models.DateField(null=True, blank=True, default=None)
+    recurrence_interval = models.PositiveIntegerField(
+        null=True, blank=True, default=None
+    )
+    recurrence_origin = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        default=None,
+        on_delete=models.SET_NULL,
+        related_name="recurrences",
+    )
 
     def save(self, *args, **kwargs):
         previous = None

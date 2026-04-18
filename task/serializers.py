@@ -40,8 +40,36 @@ class TaskSerializer(serializers.ModelSerializer):
             "description",
             "energy_level",
             "tag",
+            "date",
+            "recurrence_interval",
+            "recurrence_origin",
         ]
-        read_only_fields = ["id", "created_at", "updated_at", "completed_at"]
+        read_only_fields = [
+            "id",
+            "created_at",
+            "updated_at",
+            "completed_at",
+            "recurrence_origin",
+        ]
+
+    def validate_recurrence_interval(self, value):
+        if value is not None and value < 1:
+            raise serializers.ValidationError(
+                "Recurrence interval must be at least 1 day."
+            )
+        return value
+
+    def validate(self, attrs):
+        interval = attrs.get(
+            "recurrence_interval",
+            self.instance.recurrence_interval if self.instance else None,
+        )
+        date = attrs.get("date", self.instance.date if self.instance else None)
+        if interval is not None and date is None:
+            raise serializers.ValidationError(
+                {"date": "A date is required when setting a recurrence interval."}
+            )
+        return attrs
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

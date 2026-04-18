@@ -8,5 +8,9 @@ router.register("tasks", TaskViewSet, basename="task")
 router.register("task-tags", TaskTagViewSet, basename="task-tag")
 
 urlpatterns = [
-    path("tasks/completion-time/", TaskCompletionTimeView.as_view(), name="task-completion-time"),
+    path(
+        "tasks/completion-time/",
+        TaskCompletionTimeView.as_view(),
+        name="task-completion-time",
+    ),
 ] + router.urls

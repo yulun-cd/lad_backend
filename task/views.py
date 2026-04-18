@@ -27,7 +27,7 @@ class TaskTagViewSet(viewsets.ModelViewSet):
 class TaskViewSet(viewsets.ModelViewSet):
     serializer_class = TaskSerializer
     permission_classes = [IsAuthenticated]
-    http_method_names = ["get", "post", "put", "delete", "head", "options"]
+    http_method_names = ["get", "post", "put", "patch", "delete", "head", "options"]
 
     def get_queryset(self):
         queryset = Task.objects.filter(user=self.request.user)
@@ -68,6 +68,29 @@ class TaskViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
+
+    def perform_update(self, serializer):
+        from datetime import timedelta
+
+        previous_status = self.get_object().status
+        instance = serializer.save()
+        if (
+            previous_status != Task.Status.COMPLETED
+            and instance.status == Task.Status.COMPLETED
+            and instance.recurrence_interval is not None
+        ):
+            Task.objects.create(
+                user=instance.user,
+                name=instance.name,
+                description=instance.description,
+                energy_level=instance.energy_level,
+                tag=instance.tag,
+                date=instance.date + timedelta(days=instance.recurrence_interval),
+                recurrence_interval=instance.recurrence_interval,
+                recurrence_origin=instance,
+                status=Task.Status.PENDING,
+                done=False,
+            )
 
 
 class TaskCompletionTimeView(APIView):

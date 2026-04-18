@@ -431,7 +431,47 @@ class TaskTagRelationTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertIsNone(response.data["tag"])
 
-    def test_cannot_assign_other_users_tag_to_task(self):
+    def test_date_field_optional(self):
+        self.client.force_authenticate(user=self.user)
+        # omitted — defaults to null
+        response = self.client.post(
+            reverse("task-list"),
+            {"name": "No date", "energy_level": 2, "status": "PENDING"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertIsNone(response.data["date"])
+
+    def test_date_field_accepted_and_returned(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            reverse("task-list"),
+            {
+                "name": "Dated",
+                "energy_level": 2,
+                "status": "PENDING",
+                "date": "2026-04-17",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["date"], "2026-04-17")
+
+    def test_date_field_invalid(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            reverse("task-list"),
+            {
+                "name": "Bad date",
+                "energy_level": 2,
+                "status": "PENDING",
+                "date": "not-a-date",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("date", response.data)
+
         self.client.force_authenticate(user=self.user)
         response = self.client.post(
             reverse("task-list"),
@@ -481,11 +521,18 @@ class TaskTagRelationTests(APITestCase):
     def test_filter_tasks_by_multiple_tag_ids(self):
         self.client.force_authenticate(user=self.user)
         from task.models import TaskTag
-        tag2 = TaskTag.objects.create(name="Home", color="#00FF00", created_by=self.user)
-        Task.objects.create(user=self.user, name="Work task", energy_level=2, tag=self.tag)
+
+        tag2 = TaskTag.objects.create(
+            name="Home", color="#00FF00", created_by=self.user
+        )
+        Task.objects.create(
+            user=self.user, name="Work task", energy_level=2, tag=self.tag
+        )
         Task.objects.create(user=self.user, name="Home task", energy_level=2, tag=tag2)
         Task.objects.create(user=self.user, name="Untagged", energy_level=2)
-        response = self.client.get(reverse("task-list") + f"?tag={self.tag.id}&tag={tag2.id}")
+        response = self.client.get(
+            reverse("task-list") + f"?tag={self.tag.id}&tag={tag2.id}"
+        )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         names = [t["name"] for t in response.data]
         self.assertIn("Work task", names)
@@ -564,3 +611,173 @@ class TaskCompletionTimeTests(APITestCase):
         response = self.client.get(self.url)
         total = sum(entry["count"] for entry in response.data)
         self.assertEqual(total, 0)
+
+
+class TaskRecurrenceTests(APITestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="recur_user", password="pass"
+        )
+
+    def _create_recurring_task(self, interval=7):
+        response = self.client.post(
+            reverse("task-list"),
+            {
+                "name": "Daily walk",
+                "energy_level": 2,
+                "status": "PENDING",
+                "date": "2026-04-17",
+                "recurrence_interval": interval,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        return response.data["id"]
+
+    def test_completing_recurring_task_spawns_next(self):
+        self.client.force_authenticate(user=self.user)
+        task_id = self._create_recurring_task(interval=7)
+        self.client.put(
+            reverse("task-detail", args=[task_id]),
+            {
+                "name": "Daily walk",
+                "energy_level": 2,
+                "status": "COMPLETED",
+                "done": True,
+                "date": "2026-04-17",
+                "recurrence_interval": 7,
+            },
+            format="json",
+        )
+        tasks = Task.objects.filter(user=self.user).order_by("id")
+        self.assertEqual(tasks.count(), 2)
+        next_task = tasks.last()
+        self.assertEqual(str(next_task.date), "2026-04-24")
+        self.assertEqual(next_task.status, Task.Status.PENDING)
+        self.assertFalse(next_task.done)
+        self.assertEqual(next_task.recurrence_interval, 7)
+        self.assertEqual(next_task.recurrence_origin_id, task_id)
+
+    def test_completing_via_patch_also_spawns(self):
+        self.client.force_authenticate(user=self.user)
+        task_id = self._create_recurring_task(interval=3)
+        self.client.patch(
+            reverse("task-detail", args=[task_id]),
+            {"status": "COMPLETED", "done": True},
+            format="json",
+        )
+        self.assertEqual(Task.objects.filter(user=self.user).count(), 2)
+
+    def test_completing_non_recurring_task_does_not_spawn(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            reverse("task-list"),
+            {"name": "One-off", "energy_level": 2, "status": "PENDING"},
+            format="json",
+        )
+        task_id = response.data["id"]
+        self.client.put(
+            reverse("task-detail", args=[task_id]),
+            {"name": "One-off", "energy_level": 2, "status": "COMPLETED", "done": True},
+            format="json",
+        )
+        self.assertEqual(Task.objects.filter(user=self.user).count(), 1)
+
+    def test_completing_already_completed_does_not_spawn_again(self):
+        self.client.force_authenticate(user=self.user)
+        task_id = self._create_recurring_task(interval=7)
+        self.client.put(
+            reverse("task-detail", args=[task_id]),
+            {
+                "name": "Daily walk",
+                "energy_level": 2,
+                "status": "COMPLETED",
+                "done": True,
+                "date": "2026-04-17",
+                "recurrence_interval": 7,
+            },
+            format="json",
+        )
+        self.client.put(
+            reverse("task-detail", args=[task_id]),
+            {
+                "name": "Daily walk",
+                "energy_level": 2,
+                "status": "COMPLETED",
+                "done": True,
+                "date": "2026-04-17",
+                "recurrence_interval": 7,
+            },
+            format="json",
+        )
+        self.assertEqual(Task.objects.filter(user=self.user).count(), 2)
+
+    def test_spawned_task_inherits_config(self):
+        self.client.force_authenticate(user=self.user)
+        task_id = self._create_recurring_task(interval=14)
+        original = Task.objects.get(id=task_id)
+        self.client.put(
+            reverse("task-detail", args=[task_id]),
+            {
+                "name": "Daily walk",
+                "energy_level": 2,
+                "status": "COMPLETED",
+                "done": True,
+                "date": "2026-04-17",
+                "recurrence_interval": 14,
+            },
+            format="json",
+        )
+        spawned = Task.objects.filter(user=self.user).exclude(id=task_id).first()
+        self.assertEqual(spawned.name, original.name)
+        self.assertEqual(spawned.energy_level, original.energy_level)
+        self.assertEqual(spawned.recurrence_interval, original.recurrence_interval)
+
+    def test_recurrence_interval_requires_date(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            reverse("task-list"),
+            {
+                "name": "No date",
+                "energy_level": 2,
+                "status": "PENDING",
+                "recurrence_interval": 7,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("date", response.data)
+
+    def test_recurrence_interval_must_be_positive(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            reverse("task-list"),
+            {
+                "name": "Bad",
+                "energy_level": 2,
+                "status": "PENDING",
+                "date": "2026-04-17",
+                "recurrence_interval": 0,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("recurrence_interval", response.data)
+
+    def test_recurrence_origin_is_read_only(self):
+        self.client.force_authenticate(user=self.user)
+        other_task = Task.objects.create(user=self.user, name="Other", energy_level=2)
+        response = self.client.post(
+            reverse("task-list"),
+            {
+                "name": "Forged",
+                "energy_level": 2,
+                "status": "PENDING",
+                "date": "2026-04-17",
+                "recurrence_interval": 7,
+                "recurrence_origin": other_task.id,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertIsNone(response.data["recurrence_origin"])
