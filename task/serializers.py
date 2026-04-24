@@ -43,6 +43,7 @@ class TaskSerializer(serializers.ModelSerializer):
             "date",
             "recurrence_interval",
             "recurrence_origin",
+            "position",
         ]
         read_only_fields = [
             "id",
@@ -56,6 +57,13 @@ class TaskSerializer(serializers.ModelSerializer):
         if value is not None and value < 1:
             raise serializers.ValidationError(
                 "Recurrence interval must be at least 1 day."
+            )
+        return value
+
+    def validate_position(self, value):
+        if value is not None and value < 1:
+            raise serializers.ValidationError(
+                "Position must be a positive integer (>= 1)."
             )
         return value
 

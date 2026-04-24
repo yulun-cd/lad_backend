@@ -72,6 +72,21 @@ class Task(models.Model):
         on_delete=models.SET_NULL,
         related_name="recurrences",
     )
+    position = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        default=None,
+        validators=[MinValueValidator(1)],
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "status", "position"],
+                condition=models.Q(position__isnull=False),
+                name="unique_task_position_per_user_status",
+            )
+        ]
 
     def save(self, *args, **kwargs):
         previous = None

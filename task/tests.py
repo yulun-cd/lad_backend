@@ -11,6 +11,19 @@ from rest_framework.test import APITestCase
 from task.models import Task
 
 
+def _all_tasks(grouped_data):
+    """Flatten grouped list response into a single list of tasks."""
+    tasks = []
+    for group in grouped_data:
+        tasks.extend(group["tasks"])
+    return tasks
+
+
+def _tasks_by_id(grouped_data):
+    """Return a dict of task id → task from grouped list response."""
+    return {t["id"]: t for t in _all_tasks(grouped_data)}
+
+
 class TaskModelTests(TestCase):
     def test_task_defaults_and_created_at(self):
         task = Task.objects.create(
@@ -108,10 +121,13 @@ class TaskApiTests(APITestCase):
 
         list_response = self.client.get(create_url)
         self.assertEqual(list_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(list_response.data), 1)
-        self.assertEqual(list_response.data[0]["name"], payload["name"])
+        pending_group = next(
+            g for g in list_response.data if g["status"] == Task.Status.PENDING
+        )
+        self.assertEqual(len(pending_group["tasks"]), 1)
+        self.assertEqual(pending_group["tasks"][0]["name"], payload["name"])
         self.assertEqual(
-            Task.objects.get(id=list_response.data[0]["id"]).user, self.user
+            Task.objects.get(id=pending_group["tasks"][0]["id"]).user, self.user
         )
 
     def test_full_crud_flow(self):
@@ -224,9 +240,12 @@ class TaskApiTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 1)
-        self.assertEqual(response.data[0]["name"], "Task done")
-        self.assertEqual(response.data[0]["status"], Task.Status.COMPLETED)
+        completed_group = next(
+            g for g in response.data if g["status"] == Task.Status.COMPLETED
+        )
+        self.assertEqual(len(completed_group["tasks"]), 1)
+        self.assertEqual(completed_group["tasks"][0]["name"], "Task done")
+        self.assertEqual(completed_group["tasks"][0]["status"], Task.Status.COMPLETED)
 
     def test_list_filter_rejects_invalid_status(self):
         self.client.force_authenticate(user=self.user)
@@ -236,62 +255,55 @@ class TaskApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("status", response.data)
 
-    def test_list_orders_by_status_then_last_activity(self):
+    def test_list_orders_by_status_then_position(self):
         self.client.force_authenticate(user=self.user)
-        base_time = timezone.now() - timedelta(days=2)
 
         completed = Task.objects.create(
             user=self.user,
-            name="Completed newest",
+            name="Completed",
             status=Task.Status.COMPLETED,
             energy_level=2,
         )
-        pending_old = Task.objects.create(
+        pending_first = Task.objects.create(
             user=self.user,
-            name="Pending old",
+            name="Pending first",
             status=Task.Status.PENDING,
             energy_level=3,
+            position=1,
         )
-        pending_updated = Task.objects.create(
+        pending_second = Task.objects.create(
             user=self.user,
-            name="Pending updated",
+            name="Pending second",
             status=Task.Status.PENDING,
             energy_level=4,
+            position=2,
         )
         in_progress = Task.objects.create(
             user=self.user,
-            name="In progress oldest",
+            name="In progress",
             status=Task.Status.IN_PROGRESS,
             energy_level=5,
         )
 
-        Task.objects.filter(id=completed.id).update(
-            created_at=base_time + timedelta(hours=4)
-        )
-        Task.objects.filter(id=pending_old.id).update(
-            created_at=base_time + timedelta(hours=2)
-        )
-        Task.objects.filter(id=pending_updated.id).update(
-            created_at=base_time + timedelta(hours=1)
-        )
-        Task.objects.filter(id=in_progress.id).update(created_at=base_time)
-
-        pending_updated.description = "updated"
-        pending_updated.save()
-
         response = self.client.get(reverse("task-list"))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        ordered_names = [item["name"] for item in response.data]
+        self.assertEqual(len(response.data), 3)
+        statuses = [g["status"] for g in response.data]
         self.assertEqual(
-            ordered_names,
-            [
-                "In progress oldest",
-                "Pending updated",
-                "Pending old",
-                "Completed newest",
-            ],
+            statuses,
+            [Task.Status.IN_PROGRESS, Task.Status.PENDING, Task.Status.COMPLETED],
         )
+        in_progress_tasks = response.data[0]["tasks"]
+        pending_tasks = response.data[1]["tasks"]
+        completed_tasks = response.data[2]["tasks"]
+        self.assertEqual(len(in_progress_tasks), 1)
+        self.assertEqual(len(pending_tasks), 2)
+        self.assertEqual(len(completed_tasks), 1)
+        self.assertEqual(in_progress_tasks[0]["name"], "In progress")
+        self.assertEqual(pending_tasks[0]["name"], "Pending first")
+        self.assertEqual(pending_tasks[1]["name"], "Pending second")
+        self.assertEqual(completed_tasks[0]["name"], "Completed")
 
 
 class TaskTagApiTests(APITestCase):
@@ -514,7 +526,7 @@ class TaskTagRelationTests(APITestCase):
         Task.objects.create(user=self.user, name="Untagged", energy_level=2)
         response = self.client.get(reverse("task-list") + f"?tag={self.tag.id}")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        names = [t["name"] for t in response.data]
+        names = [t["name"] for t in _all_tasks(response.data)]
         self.assertIn("Tagged", names)
         self.assertNotIn("Untagged", names)
 
@@ -534,7 +546,7 @@ class TaskTagRelationTests(APITestCase):
             reverse("task-list") + f"?tag={self.tag.id}&tag={tag2.id}"
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        names = [t["name"] for t in response.data]
+        names = [t["name"] for t in _all_tasks(response.data)]
         self.assertIn("Work task", names)
         self.assertIn("Home task", names)
         self.assertNotIn("Untagged", names)
@@ -550,7 +562,7 @@ class TaskTagRelationTests(APITestCase):
         Task.objects.create(user=self.user, name="Tagged", energy_level=2, tag=self.tag)
         response = self.client.get(reverse("task-list") + "?tag=99999")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 0)
+        self.assertEqual(len(_all_tasks(response.data)), 0)
 
 
 class TaskCompletionTimeTests(APITestCase):
@@ -781,3 +793,282 @@ class TaskRecurrenceTests(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertIsNone(response.data["recurrence_origin"])
+
+
+class TaskFilterEndpointTests(APITestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="filter_user", password="pass"
+        )
+        self.other_user = get_user_model().objects.create_user(
+            username="filter_other", password="pass"
+        )
+        self.url = reverse("task-filter")
+        self.t1 = Task.objects.create(
+            user=self.user,
+            name="Alpha workout",
+            energy_level=4,
+            status=Task.Status.PENDING,
+            date="2026-04-10",
+        )
+        self.t2 = Task.objects.create(
+            user=self.user,
+            name="Beta study",
+            energy_level=2,
+            status=Task.Status.COMPLETED,
+            date="2026-04-15",
+        )
+        self.t3 = Task.objects.create(
+            user=self.user,
+            name="Gamma rest",
+            energy_level=1,
+            status=Task.Status.IN_PROGRESS,
+            date="2026-04-20",
+        )
+        Task.objects.create(user=self.other_user, name="Other task", energy_level=3)
+
+    def test_requires_authentication(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_returns_only_own_tasks(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 3)
+
+    def test_filter_exact_status(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url, {"status": "PENDING"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]["name"], "Alpha workout")
+
+    def test_filter_name_icontains(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url, {"name": "study"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]["name"], "Beta study")
+
+    def test_filter_energy_level_gte(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url, {"energy_level__gte": 4})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]["name"], "Alpha workout")
+
+    def test_filter_energy_level_lt(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url, {"energy_level__lt": 2})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]["name"], "Gamma rest")
+
+    def test_filter_date_gte(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url, {"date__gte": "2026-04-15"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        names = {t["name"] for t in response.data}
+        self.assertIn("Beta study", names)
+        self.assertIn("Gamma rest", names)
+        self.assertNotIn("Alpha workout", names)
+
+    def test_filter_multiple_params(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(
+            self.url, {"energy_level__gte": 2, "date__lte": "2026-04-15"}
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        names = {t["name"] for t in response.data}
+        self.assertIn("Alpha workout", names)
+        self.assertIn("Beta study", names)
+        self.assertNotIn("Gamma rest", names)
+
+    def test_invalid_field_returns_400(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url, {"nonexistent_field": "val"})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("nonexistent_field", response.data)
+
+    def test_invalid_operator_returns_400(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url, {"status__gt": "PENDING"})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("status__gt", response.data)
+
+    def test_invalid_value_type_returns_400(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url, {"energy_level__gte": "notanumber"})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("energy_level__gte", response.data)
+
+
+class TaskPositionTests(APITestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="pos_user", password="pass"
+        )
+
+    def _create(self, name, status=Task.Status.PENDING, energy_level=2):
+        response = self.client.post(
+            reverse("task-list"),
+            {"name": name, "energy_level": energy_level, "status": status},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201)
+        return response.data["id"]
+
+    def _move(self, task_id, position):
+        return self.client.patch(
+            reverse("task-detail", args=[task_id]),
+            {"position": position},
+            format="json",
+        )
+
+    def test_created_tasks_get_sequential_positions(self):
+        self.client.force_authenticate(user=self.user)
+        id1 = self._create("Task A")
+        id2 = self._create("Task B")
+        id3 = self._create("Task C")
+        positions = {
+            t["id"]: t["position"]
+            for t in _all_tasks(self.client.get(reverse("task-list")).data)
+        }
+        self.assertEqual(positions[id1], 1)
+        self.assertEqual(positions[id2], 2)
+        self.assertEqual(positions[id3], 3)
+
+    def test_positions_are_scoped_per_status(self):
+        self.client.force_authenticate(user=self.user)
+        id_pending = self._create("Pending", status=Task.Status.PENDING)
+        id_ip = self._create("In Progress", status=Task.Status.IN_PROGRESS)
+        tasks = _tasks_by_id(self.client.get(reverse("task-list")).data)
+        self.assertEqual(tasks[id_pending]["position"], 1)
+        self.assertEqual(tasks[id_ip]["position"], 1)
+
+    def test_reorder_requires_authentication(self):
+        response = self.client.patch(
+            reverse("task-detail", args=[1]), {"position": 1}, format="json"
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_reorder_moves_task_down(self):
+        self.client.force_authenticate(user=self.user)
+        id1 = self._create("A")
+        id2 = self._create("B")
+        id3 = self._create("C")
+        self._move(id1, 3)
+        tasks = sorted(
+            _all_tasks(self.client.get(reverse("task-list")).data),
+            key=lambda t: t["position"],
+        )
+        names = [t["name"] for t in tasks if t["status"] == "PENDING"]
+        self.assertEqual(names, ["B", "C", "A"])
+
+    def test_reorder_moves_task_up(self):
+        self.client.force_authenticate(user=self.user)
+        id1 = self._create("A")
+        id2 = self._create("B")
+        id3 = self._create("C")
+        self._move(id3, 1)
+        tasks = sorted(
+            _all_tasks(self.client.get(reverse("task-list")).data),
+            key=lambda t: t["position"],
+        )
+        names = [t["name"] for t in tasks if t["status"] == "PENDING"]
+        self.assertEqual(names, ["C", "A", "B"])
+
+    def test_reorder_clamped_to_column_bounds(self):
+        self.client.force_authenticate(user=self.user)
+        id1 = self._create("A")
+        id2 = self._create("B")
+        response = self._move(id1, 999)
+        self.assertEqual(response.status_code, 200)
+        tasks = _tasks_by_id(self.client.get(reverse("task-list")).data)
+        self.assertEqual(tasks[id1]["position"], 2)
+
+    def test_patch_response_returns_updated_position(self):
+        self.client.force_authenticate(user=self.user)
+        id1 = self._create("A")
+        id2 = self._create("B")
+
+        response = self._move(id1, 2)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["id"], id1)
+        self.assertEqual(response.data["position"], 2)
+
+    def test_reorder_cannot_move_other_users_task(self):
+        self.client.force_authenticate(user=self.user)
+        other_user = get_user_model().objects.create_user(
+            username="pos_other", password="pass"
+        )
+        other_task = Task.objects.create(user=other_user, name="Theirs", energy_level=2)
+        response = self._move(other_task.id, 1)
+        self.assertEqual(response.status_code, 404)
+
+    def test_delete_compacts_positions(self):
+        self.client.force_authenticate(user=self.user)
+        id1 = self._create("A")
+        id2 = self._create("B")
+        id3 = self._create("C")
+        self.client.delete(reverse("task-detail", args=[id2]))
+        tasks = _tasks_by_id(self.client.get(reverse("task-list")).data)
+        self.assertEqual(tasks[id1]["position"], 1)
+        self.assertEqual(tasks[id3]["position"], 2)
+
+    def test_status_change_compacts_old_column_and_appends_to_new(self):
+        self.client.force_authenticate(user=self.user)
+        id1 = self._create("A")
+        id2 = self._create("B")
+        id3 = self._create("C")
+        # Move id2 (pos=1) to IN_PROGRESS
+        self.client.patch(
+            reverse("task-detail", args=[id2]),
+            {"status": "IN_PROGRESS", "done": False},
+            format="json",
+        )
+        tasks = _tasks_by_id(self.client.get(reverse("task-list")).data)
+        self.assertEqual(tasks[id1]["position"], 1)
+        self.assertEqual(tasks[id3]["position"], 2)
+        self.assertEqual(tasks[id2]["status"], "IN_PROGRESS")
+        self.assertEqual(tasks[id2]["position"], 1)
+
+    def test_status_change_to_non_empty_column_avoids_unique_conflict(self):
+        self.client.force_authenticate(user=self.user)
+        in_progress_id = self._create("IP", status=Task.Status.IN_PROGRESS)
+        pending_id = self._create("P", status=Task.Status.PENDING)
+
+        response = self.client.patch(
+            reverse("task-detail", args=[pending_id]),
+            {"status": "IN_PROGRESS", "done": False},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        tasks = _tasks_by_id(self.client.get(reverse("task-list")).data)
+        self.assertEqual(tasks[in_progress_id]["position"], 1)
+        self.assertEqual(tasks[pending_id]["status"], "IN_PROGRESS")
+        self.assertEqual(tasks[pending_id]["position"], 2)
+
+    def test_status_change_with_position_applies_and_returns_position(self):
+        self.client.force_authenticate(user=self.user)
+        ip1 = self._create("IP1", status=Task.Status.IN_PROGRESS)
+        ip2 = self._create("IP2", status=Task.Status.IN_PROGRESS)
+        pending = self._create("P", status=Task.Status.PENDING)
+
+        response = self.client.patch(
+            reverse("task-detail", args=[pending]),
+            {"status": "IN_PROGRESS", "position": 1, "done": False},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["position"], 1)
+        self.assertEqual(response.data["status"], "IN_PROGRESS")
+
+        tasks = _tasks_by_id(self.client.get(reverse("task-list")).data)
+        self.assertEqual(tasks[pending]["position"], 1)
+        self.assertEqual(tasks[ip1]["position"], 2)
+        self.assertEqual(tasks[ip2]["position"], 3)
